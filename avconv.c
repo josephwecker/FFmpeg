@@ -213,7 +213,7 @@ static int64_t extra_size = 0;
 static int nb_frames_dup = 0;
 static int nb_frames_drop = 0;
 static int input_sync;
-static uint64_t limit_filesize = 0;
+static uint64_t limit_filesize = UINT64_MAX;
 static int force_fps = 0;
 static char *forced_key_frames = NULL;
 
@@ -324,6 +324,7 @@ typedef struct OutputFile {
     int ost_index;       /* index of the first stream in output_streams */
     int64_t recording_time; /* desired length of the resulting file in microseconds */
     int64_t start_time;     /* start time in microseconds */
+    uint64_t limit_filesize;
 } OutputFile;
 
 static InputStream *input_streams = NULL;
@@ -1073,6 +1074,7 @@ static void do_video_resample(OutputStream *ost,
 {
     int resample_changed = 0;
     AVCodecContext *dec = ist->st->codec;
+    AVCodecContext *enc = ost->st->codec;
     *out_picture = in_picture;
 
     resample_changed = ost->resample_width   != dec->width  ||
@@ -1455,7 +1457,7 @@ static void generate_silence(uint8_t* buf, enum AVSampleFormat sample_fmt, size_
     memset(buf, fill_char, size);
 }
 
-static void flush_encoders(int ist_index, OutputStream *ost_table, int nb_ostreams)
+static void flush_encoders(OutputStream *ost_table, int nb_ostreams)
 {
     int i, ret;
 
@@ -1464,7 +1466,7 @@ static void flush_encoders(int ist_index, OutputStream *ost_table, int nb_ostrea
         AVCodecContext *enc = ost->st->codec;
         AVFormatContext *os = output_files[ost->file_index].ctx;
 
-        if (ost->source_index != ist_index || !ost->encoding_needed)
+        if (!ost->encoding_needed)
             continue;
 
         if (ost->st->codec->codec_type == AVMEDIA_TYPE_AUDIO && enc->frame_size <=1)
@@ -1685,7 +1687,6 @@ static int output_packet(InputStream *ist, int ist_index,
                 }
                 break;
             }
-            ret = avpkt.size;
             avpkt.size = 0;
         }
 
@@ -1696,9 +1697,7 @@ static int output_packet(InputStream *ist, int ist_index,
                 volp = samples;
                 for(i=0;i<(decoded_data_size / sizeof(short));i++) {
                     int v = ((*volp) * audio_volume + 128) >> 8;
-                    if (v < -32768) v = -32768;
-                    if (v >  32767) v = 32767;
-                    *volp++ = v;
+                    *volp++ = av_clip_int16(v);
                 }
             }
         }
@@ -1865,10 +1864,6 @@ static int output_packet(InputStream *ist, int ist_index,
         }
     }
  discard_packet:
-    if (pkt == NULL) {
-        /* EOF handling */
-        flush_encoders(ist_index, ost_table, nb_ostreams);
-    }
 
     return 0;
 }
@@ -1897,8 +1892,6 @@ static int init_input_stream(int ist_index, OutputStream *output_streams, int nb
     InputStream *ist = &input_streams[ist_index];
     if (ist->decoding_needed) {
         AVCodec *codec = ist->dec;
-        if (!codec)
-            codec = avcodec_find_decoder(ist->st->codec->codec_id);
         if (!codec) {
             snprintf(error, sizeof(error), "Decoder (codec id %d) not found for input stream #%d.%d",
                     ist->st->codec->codec_id, ist->file_index, ist->st->index);
@@ -1921,28 +1914,18 @@ static int init_input_stream(int ist_index, OutputStream *output_streams, int nb
     return 0;
 }
 
-/*
- * The following code is the main loop of the file converter
- */
-static int transcode(OutputFile *output_files,
-                     int nb_output_files,
-                     InputFile *input_files,
-                     int nb_input_files)
+static int transcode_init(OutputFile *output_files,
+                          int nb_output_files,
+                          InputFile *input_files,
+                          int nb_input_files)
 {
-    int ret = 0, i, step;
-    AVFormatContext *is, *os;
+    int ret = 0, i;
+    AVFormatContext *os;
     AVCodecContext *codec, *icodec;
     OutputStream *ost;
     InputStream *ist;
     char error[1024];
-    int key;
     int want_sdp = 1;
-    uint8_t *no_packet;
-    int no_packet_count=0;
-    int64_t timer_start;
-
-    if (!(no_packet = av_mallocz(nb_input_files)))
-        exit_program(1);
 
     if (rate_emu)
         for (i = 0; i < nb_input_streams; i++)
@@ -1954,8 +1937,7 @@ static int transcode(OutputFile *output_files,
         if (!os->nb_streams && !(os->oformat->flags & AVFMT_NOSTREAMS)) {
             av_dump_format(os, i, os->filename, 1);
             fprintf(stderr, "Output file #%d does not contain any stream\n", i);
-            ret = AVERROR(EINVAL);
-            goto fail;
+            return AVERROR(EINVAL);
         }
     }
 
@@ -1975,8 +1957,9 @@ static int transcode(OutputFile *output_files,
         if (ost->st->stream_copy) {
             uint64_t extra_size = (uint64_t)icodec->extradata_size + FF_INPUT_BUFFER_PADDING_SIZE;
 
-            if (extra_size > INT_MAX)
-                goto fail;
+            if (extra_size > INT_MAX) {
+                return AVERROR(EINVAL);
+            }
 
             /* if stream_copy is selected, no need to decode or encode */
             codec->codec_id = icodec->codec_id;
@@ -1993,8 +1976,9 @@ static int transcode(OutputFile *output_files,
             codec->rc_max_rate    = icodec->rc_max_rate;
             codec->rc_buffer_size = icodec->rc_buffer_size;
             codec->extradata= av_mallocz(extra_size);
-            if (!codec->extradata)
-                goto fail;
+            if (!codec->extradata) {
+                return AVERROR(ENOMEM);
+            }
             memcpy(codec->extradata, icodec->extradata, icodec->extradata_size);
             codec->extradata_size= icodec->extradata_size;
 
@@ -2059,8 +2043,9 @@ static int transcode(OutputFile *output_files,
             switch(codec->codec_type) {
             case AVMEDIA_TYPE_AUDIO:
                 ost->fifo= av_fifo_alloc(1024);
-                if(!ost->fifo)
-                    goto fail;
+                if (!ost->fifo) {
+                    return AVERROR(ENOMEM);
+                }
                 ost->reformat_pair = MAKE_SFMT_PAIR(AV_SAMPLE_FMT_NONE,AV_SAMPLE_FMT_NONE);
                 if (!codec->sample_rate) {
                     codec->sample_rate = icodec->sample_rate;
@@ -2179,8 +2164,7 @@ static int transcode(OutputFile *output_files,
     if (!bit_buffer) {
         fprintf(stderr, "Cannot allocate %d bytes output buffer\n",
                 bit_buffer_size);
-        ret = AVERROR(ENOMEM);
-        goto fail;
+        return AVERROR(ENOMEM);
     }
 
     /* open each encoder */
@@ -2261,18 +2245,49 @@ static int transcode(OutputFile *output_files,
                         ost->sync_ist->st->index);
             if (ost->st->stream_copy)
                 fprintf(stderr, " (copy)");
+            else
+                fprintf(stderr, " (%s -> %s)", input_streams[ost->source_index].dec ?
+                        input_streams[ost->source_index].dec->name : "?",
+                        ost->enc ? ost->enc->name : "?");
             fprintf(stderr, "\n");
         }
     }
 
     if (ret) {
         fprintf(stderr, "%s\n", error);
-        goto fail;
+        return ret;
     }
 
     if (want_sdp) {
         print_sdp(output_files, nb_output_files);
     }
+
+    return 0;
+}
+
+/*
+ * The following code is the main loop of the file converter
+ */
+static int transcode(OutputFile *output_files,
+                     int nb_output_files,
+                     InputFile *input_files,
+                     int nb_input_files)
+{
+    int ret, i;
+    AVFormatContext *is, *os;
+    OutputStream *ost;
+    InputStream *ist;
+    uint8_t *no_packet;
+    int no_packet_count=0;
+    int64_t timer_start;
+    int key;
+
+    if (!(no_packet = av_mallocz(nb_input_files)))
+        exit_program(1);
+
+    ret = transcode_init(output_files, nb_output_files, input_files, nb_input_files);
+    if (ret < 0)
+        goto fail;
 
     if (!using_stdin) {
         if(verbose >= 0)
@@ -2289,7 +2304,6 @@ static int transcode(OutputFile *output_files,
         int64_t ipts_min;
         double opts_min;
 
-    redo:
         ipts_min = INT64_MAX;
         opts_min= 1e100;
         /* if 'q' pressed, exits */
@@ -2348,14 +2362,17 @@ static int transcode(OutputFile *output_files,
            smallest output pts */
         file_index = -1;
         for (i = 0; i < nb_output_streams; i++) {
+            OutputFile *of;
             int64_t ipts;
             double  opts;
             ost = &output_streams[i];
+            of = &output_files[ost->file_index];
             os = output_files[ost->file_index].ctx;
             ist = &input_streams[ost->source_index];
-            if(ost->is_past_recording_time || no_packet[ist->file_index])
+            if (ost->is_past_recording_time || no_packet[ist->file_index] ||
+                (os->pb && avio_tell(os->pb) >= of->limit_filesize))
                 continue;
-                opts = ost->st->pts.val * av_q2d(ost->st->time_base);
+            opts = ost->st->pts.val * av_q2d(ost->st->time_base);
             ipts = ist->pts;
             if (!input_files[ist->file_index].eof_reached){
                 if(ipts < ipts_min) {
@@ -2382,10 +2399,6 @@ static int transcode(OutputFile *output_files,
             }
             break;
         }
-
-        /* finish if limit size exhausted */
-        if (limit_filesize != 0 && limit_filesize <= avio_tell(output_files[0].ctx->pb))
-            break;
 
         /* read a frame from it and output it in the fifo */
         is = input_files[file_index].ctx;
@@ -2456,7 +2469,7 @@ static int transcode(OutputFile *output_files,
             if (exit_on_error)
                 exit_program(1);
             av_free_packet(&pkt);
-            goto redo;
+            continue;
         }
 
     discard_packet:
@@ -2473,6 +2486,7 @@ static int transcode(OutputFile *output_files,
             output_packet(ist, i, output_streams, nb_output_streams, NULL);
         }
     }
+    flush_encoders(output_streams, nb_output_streams);
 
     term_exit();
 
@@ -2988,6 +3002,8 @@ static void add_input_streams(AVFormatContext *ic)
             ist->ts_scale = strtod(scale, NULL);
 
         ist->dec = choose_codec(ic, st, dec->codec_type, codec_names);
+        if (!ist->dec)
+            ist->dec = avcodec_find_decoder(dec->codec_id);
 
         switch (dec->codec_type) {
         case AVMEDIA_TYPE_AUDIO:
@@ -3176,6 +3192,7 @@ static int opt_input_file(const char *opt, const char *filename)
     audio_channels    = 0;
     audio_sample_fmt  = AV_SAMPLE_FMT_NONE;
     av_dict_free(&ts_scale);
+    input_ts_offset = 0;
 
     for (i = 0; i < orig_nb_streams; i++)
         av_dict_free(&opts[i]);
@@ -3662,6 +3679,7 @@ static int opt_output_file(const char *opt, const char *filename)
     output_files[nb_output_files - 1].ost_index = nb_output_streams - oc->nb_streams;
     output_files[nb_output_files - 1].recording_time = recording_time;
     output_files[nb_output_files - 1].start_time     = start_time;
+    output_files[nb_output_files - 1].limit_filesize = limit_filesize;
     av_dict_copy(&output_files[nb_output_files - 1].opts, format_opts, 0);
 
     /* check filename in case of an image number is expected */
@@ -3788,6 +3806,7 @@ static int opt_output_file(const char *opt, const char *filename)
     chapters_input_file = INT_MAX;
     recording_time = INT64_MAX;
     start_time     = 0;
+    limit_filesize = UINT64_MAX;
 
     av_freep(&meta_data_maps);
     nb_meta_data_maps = 0;

@@ -2436,8 +2436,8 @@ static int transcode(AVFormatContext **output_files,
             AVCodec *codec = ost->enc;
             AVCodecContext *dec = input_streams[ost->source_index].st->codec;
             if (!codec) {
-                snprintf(error, sizeof(error), "Encoder (codec id %d) not found for output stream #%d.%d",
-                         ost->st->codec->codec_id, ost->file_index, ost->index);
+                snprintf(error, sizeof(error), "Encoder (codec %s) not found for output stream #%d.%d",
+                         avcodec_get_name(ost->st->codec->codec_id), ost->file_index, ost->index);
                 ret = AVERROR(EINVAL);
                 goto dump_format;
             }
@@ -2473,8 +2473,8 @@ static int transcode(AVFormatContext **output_files,
             if (!codec)
                 codec = avcodec_find_decoder(ist->st->codec->codec_id);
             if (!codec) {
-                snprintf(error, sizeof(error), "Decoder (codec id %d) not found for input stream #%d.%d",
-                        ist->st->codec->codec_id, ist->file_index, ist->st->index);
+                snprintf(error, sizeof(error), "Decoder (codec %s) not found for input stream #%d.%d",
+                        avcodec_get_name(ist->st->codec->codec_id), ist->file_index, ist->st->index);
                 ret = AVERROR(EINVAL);
                 goto dump_format;
             }
@@ -2623,6 +2623,13 @@ static int transcode(AVFormatContext **output_files,
                 fprintf(stderr, " [sync #%d.%d]",
                         ost->sync_ist->file_index,
                         ost->sync_ist->st->index);
+            if(ost->encoding_needed)
+                fprintf(stderr, ": %s -> %s",
+                    input_streams[ost->source_index].dec ?
+                        input_streams[ost->source_index].dec->name : "?",
+                    ost->enc ? ost->enc->name : "?");
+            else
+                fprintf(stderr, ": copy");
             fprintf(stderr, "\n");
         }
     }
@@ -2797,7 +2804,10 @@ static int transcode(AVFormatContext **output_files,
             && (is->iformat->flags & AVFMT_TS_DISCONT)) {
             int64_t pkt_dts= av_rescale_q(pkt.dts, ist->st->time_base, AV_TIME_BASE_Q);
             int64_t delta= pkt_dts - ist->next_pts;
-            if((FFABS(delta) > 1LL*dts_delta_threshold*AV_TIME_BASE || pkt_dts+1<ist->pts)&& !copy_ts){
+            if((delta < -1LL*dts_delta_threshold*AV_TIME_BASE ||
+                (delta > 1LL*dts_delta_threshold*AV_TIME_BASE &&
+                 ist->st->codec->codec_type != AVMEDIA_TYPE_SUBTITLE) ||
+                pkt_dts+1<ist->pts)&& !copy_ts){
                 input_files[ist->file_index].ts_offset -= delta;
                 if (verbose > 2)
                     fprintf(stderr, "timestamp discontinuity %"PRId64", new offset= %"PRId64"\n",

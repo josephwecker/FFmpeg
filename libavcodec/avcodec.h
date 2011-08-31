@@ -208,6 +208,8 @@ enum CodecID {
     CODEC_ID_PRORES,
     CODEC_ID_JV,
     CODEC_ID_DFA,
+    CODEC_ID_WMV3IMAGE,
+    CODEC_ID_VC1IMAGE,
     CODEC_ID_8SVX_RAW,
     CODEC_ID_G2M,
 
@@ -2423,19 +2425,23 @@ typedef struct AVCodecContext {
      */
     int brd_scale;
 
+#if FF_API_X264_GLOBAL_OPTS
     /**
      * constant rate factor - quality-based VBR - values ~correspond to qps
      * - encoding: Set by user.
      * - decoding: unused
+     *   @deprecated use 'crf' libx264 private option
      */
-    float crf;
+    attribute_deprecated float crf;
 
     /**
      * constant quantization parameter rate control method
      * - encoding: Set by user.
      * - decoding: unused
+     *   @deprecated use 'cqp' libx264 private option
      */
-    int cqp;
+    attribute_deprecated int cqp;
+#endif
 
     /**
      * minimum GOP size
@@ -2754,6 +2760,7 @@ typedef struct AVCodecContext {
      */
     int (*execute2)(struct AVCodecContext *c, int (*func)(struct AVCodecContext *c2, void *arg, int jobnr, int threadnr), void *arg2, int *ret, int count);
 
+#if FF_API_X264_GLOBAL_OPTS
     /**
      * explicit P-frame weighted prediction analysis method
      * 0: off
@@ -2762,7 +2769,7 @@ typedef struct AVCodecContext {
      * - encoding: Set by user.
      * - decoding: unused
      */
-    int weighted_p_pred;
+    attribute_deprecated int weighted_p_pred;
 
     /**
      * AQ mode
@@ -2772,7 +2779,7 @@ typedef struct AVCodecContext {
      * - encoding: Set by user
      * - decoding: unused
      */
-    int aq_mode;
+    attribute_deprecated int aq_mode;
 
     /**
      * AQ strength
@@ -2780,7 +2787,7 @@ typedef struct AVCodecContext {
      * - encoding: Set by user
      * - decoding: unused
      */
-    float aq_strength;
+    attribute_deprecated float aq_strength;
 
     /**
      * PSY RD
@@ -2788,7 +2795,7 @@ typedef struct AVCodecContext {
      * - encoding: Set by user
      * - decoding: unused
      */
-    float psy_rd;
+    attribute_deprecated float psy_rd;
 
     /**
      * PSY trellis
@@ -2796,7 +2803,7 @@ typedef struct AVCodecContext {
      * - encoding: Set by user
      * - decoding: unused
      */
-    float psy_trellis;
+    attribute_deprecated float psy_trellis;
 
     /**
      * RC lookahead
@@ -2804,7 +2811,7 @@ typedef struct AVCodecContext {
      * - encoding: Set by user
      * - decoding: unused
      */
-    int rc_lookahead;
+    attribute_deprecated int rc_lookahead;
 
     /**
      * Constant rate factor maximum
@@ -2813,7 +2820,8 @@ typedef struct AVCodecContext {
      * - encoding: Set by user.
      * - decoding: unused
      */
-    float crf_max;
+    attribute_deprecated float crf_max;
+#endif
 
     int log_level_offset;
 
@@ -2880,8 +2888,8 @@ typedef struct AVCodecContext {
      * - decoding: Set by user, otherwise the default is used.
      */
     int thread_type;
-#define FF_THREAD_FRAME   1 //< Decode more than one frame at once
-#define FF_THREAD_SLICE   2 //< Decode more than one part of a single frame at once
+#define FF_THREAD_FRAME   1 ///< Decode more than one frame at once
+#define FF_THREAD_SLICE   2 ///< Decode more than one part of a single frame at once
 
     /**
      * Which multithreading methods are in use by the codec.
@@ -3433,6 +3441,12 @@ int avpicture_layout(const AVPicture* src, enum PixelFormat pix_fmt, int width, 
 int avpicture_get_size(enum PixelFormat pix_fmt, int width, int height);
 void avcodec_get_chroma_sub_sample(enum PixelFormat pix_fmt, int *h_shift, int *v_shift);
 
+/**
+ * Get the name of a codec.
+ * @return  a static string identifying the codec; never NULL
+ */
+const char *avcodec_get_name(enum CodecID id);
+
 #if FF_API_GET_PIX_FMT_NAME
 /**
  * Return the short name for a pixel format.
@@ -3484,7 +3498,8 @@ size_t av_get_codec_tag_string(char *buf, size_t buf_size, unsigned int codec_ta
  * @param[in] dst_pix_fmt destination pixel format
  * @param[in] src_pix_fmt source pixel format
  * @param[in] has_alpha Whether the source pixel format alpha channel is used.
- * @return Combination of flags informing you what kind of losses will occur.
+ * @return Combination of flags informing you what kind of losses will occur
+ * (maximum loss for an invalid dst_pix_fmt).
  */
 int avcodec_get_pix_fmt_loss(enum PixelFormat dst_pix_fmt, enum PixelFormat src_pix_fmt,
                              int has_alpha);
@@ -3515,6 +3530,39 @@ int avcodec_get_pix_fmt_loss(enum PixelFormat dst_pix_fmt, enum PixelFormat src_
  */
 enum PixelFormat avcodec_find_best_pix_fmt(int64_t pix_fmt_mask, enum PixelFormat src_pix_fmt,
                               int has_alpha, int *loss_ptr);
+
+/**
+ * Find the best pixel format to convert to given a certain source pixel
+ * format and a selection of two destination pixel formats. When converting from
+ * one pixel format to another, information loss may occur.  For example, when converting
+ * from RGB24 to GRAY, the color information will be lost. Similarly, other losses occur when
+ * converting from some formats to other formats. avcodec_find_best_pix_fmt2() selects which of
+ * the given pixel formats should be used to suffer the least amount of loss.
+ *
+ * If one of the destination formats is PIX_FMT_NONE the other pixel format (if valid) will be
+ * returned.
+ *
+ * @code
+ * src_pix_fmt = PIX_FMT_YUV420P;
+ * dst_pix_fmt1= PIX_FMT_RGB24;
+ * dst_pix_fmt2= PIX_FMT_GRAY8;
+ * dst_pix_fmt3= PIX_FMT_RGB8;
+ * loss= FF_LOSS_CHROMA; // don't care about chroma loss, so chroma loss will be ignored.
+ * dst_pix_fmt = avcodec_find_best_pix_fmt2(dst_pix_fmt1, dst_pix_fmt2, src_pix_fmt, alpha, &loss);
+ * dst_pix_fmt = avcodec_find_best_pix_fmt2(dst_pix_fmt, dst_pix_fmt3, src_pix_fmt, alpha, &loss);
+ * @endcode
+ *
+ * @param[in] dst_pix_fmt1 One of the two destination pixel formats to choose from
+ * @param[in] dst_pix_fmt2 The other of the two destination pixel formats to choose from
+ * @param[in] src_pix_fmt Source pixel format
+ * @param[in] has_alpha Whether the source pixel format alpha channel is used.
+ * @param[in, out] loss_ptr Combination of loss flags. In: selects which of the losses to ignore, i.e.
+ *                               NULL or value of zero means we care about all losses. Out: the loss
+ *                               that occurs when converting from src to selected dst pixel format.
+ * @return The best pixel format to convert to or -1 if none was found.
+ */
+enum PixelFormat avcodec_find_best_pix_fmt2(enum PixelFormat dst_pix_fmt1, enum PixelFormat dst_pix_fmt2,
+                                            enum PixelFormat src_pix_fmt, int has_alpha, int *loss_ptr);
 
 #define FF_ALPHA_TRANSP       0x0001 /* image has some totally transparent pixels */
 #define FF_ALPHA_SEMI_TRANSP  0x0002 /* image has some transparent pixels */
