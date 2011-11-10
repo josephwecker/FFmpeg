@@ -395,8 +395,11 @@ static int flv_read_header(AVFormatContext *s,
         if(!create_stream(s, FLV_STREAM_TYPE_AUDIO))
             return AVERROR(ENOMEM);
     }
-    // Flag doesn't indicate whether or not there is script-data present. Must
-    // create that stream if it's encountered.
+    // Flag doesn't indicate whether or not there is script-data present.
+    // Often it is not known until late in the transcoding, but needs to be
+    // mapped already, so assume all flv's have a latent data stream.
+    if(!create_stream(s, FLV_STREAM_TYPE_DATA))
+        return AVERROR(ENOMEM);
 
     offset = avio_rb32(s->pb);
     avio_seek(s->pb, offset, SEEK_SET);
