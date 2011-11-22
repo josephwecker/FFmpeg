@@ -3325,6 +3325,8 @@ int av_interleave_packet_per_dts(AVFormatContext *s, AVPacket *out, AVPacket *pk
             ++stream_count;
         } else if(s->streams[i]->codec->codec_type == AVMEDIA_TYPE_SUBTITLE) {
             ++noninterleaved_count;
+        } else if(s->streams[i]->codec->codec_type == AVMEDIA_TYPE_DATA) {
+            ++stream_count;
         }
     }
 
