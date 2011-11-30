@@ -74,6 +74,7 @@ typedef struct RTMPContext {
     int           skip_bytes;                 ///< number of bytes to skip from the input FLV stream in the next write call
     uint8_t       flv_header[11];             ///< partial incoming flv packet header
     int           flv_header_bytes;           ///< number of initialized bytes in flv_header
+    int           data_frame_sent;            ///< whether or not @setDataFrame has been sent
 } RTMPContext;
 
 #define PLAYER_KEY_OPEN_PART_LEN 30   ///< length of partial key used for first client digest signing
@@ -967,8 +968,10 @@ static int rtmp_write(URLContext *s, const uint8_t *buf, int size)
             rt->out_pkt.extra = rt->main_channel_id;
             rt->flv_data = rt->out_pkt.data;
 
-            if (pkttype == RTMP_PT_NOTIFY)
+            if ((pkttype == RTMP_PT_NOTIFY) && (! rt->data_frame_sent)) {
                 ff_amf_write_string(&rt->flv_data, "@setDataFrame");
+                rt->data_frame_sent = 1;
+            }
         }
 
         if (rt->flv_size - rt->flv_off > size_temp) {
